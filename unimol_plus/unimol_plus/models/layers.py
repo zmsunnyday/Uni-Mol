@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from unicore import utils
-from unicore.modules import softmax_dropout, LayerNorm
+from unicore.modules import softmax_dropout
 
 from torch.utils.checkpoint import checkpoint
 from unicore.utils import (
@@ -12,8 +12,8 @@ from unicore.utils import (
 
 from torch import Tensor
 from typing import Callable, Optional
-
-
+import transformer_engine.pytorch as te
+LayerNorm = te.LayerNorm
 class Dropout(nn.Module):
     def __init__(self, p):
         super().__init__()
@@ -26,22 +26,16 @@ class Dropout(nn.Module):
             return x
 
 
-class Linear(nn.Linear):
+class Linear_te(te.Linear):
     def __init__(
         self,
         d_in: int,
         d_out: int,
         bias: bool = True,
         init: str = "default",
+        use_te: bool = True
     ):
-        super(Linear, self).__init__(d_in, d_out, bias=bias)
-
-        self.use_bias = bias
-
-        if self.use_bias:
-            with torch.no_grad():
-                self.bias.fill_(0)
-
+        super(Linear_te, self).__init__(d_in, d_out, bias=bias)
         if init == "default":
             self._trunc_normal_init(1.0)
         elif init == "relu":
@@ -78,6 +72,51 @@ class Linear(nn.Linear):
     def _normal_init(self):
         torch.nn.init.kaiming_normal_(self.weight, nonlinearity="linear")
 
+class Linear_nn(nn.Linear):
+    def __init__(
+        self,
+        d_in: int,
+        d_out: int,
+        bias: bool = True,
+        init: str = "default",
+        use_te: bool = True
+    ):
+        super(Linear_nn, self).__init__(d_in, d_out, bias=bias)
+        if init == "default":
+            self._trunc_normal_init(1.0)
+        elif init == "relu":
+            self._trunc_normal_init(2.0)
+        elif init == "glorot":
+            self._glorot_uniform_init()
+        elif init == "gating":
+            self._zero_init(self.use_bias)
+        elif init == "normal":
+            self._normal_init()
+        elif init == "final":
+            self._zero_init(False)
+        else:
+            raise ValueError("Invalid init method.")
+
+    def _trunc_normal_init(self, scale=1.0):
+        # Constant from scipy.stats.truncnorm.std(a=-2, b=2, loc=0., scale=1.)
+        TRUNCATED_NORMAL_STDDEV_FACTOR = 0.87962566103423978
+        _, fan_in = self.weight.shape
+        scale = scale / max(1, fan_in)
+        std = (scale**0.5) / TRUNCATED_NORMAL_STDDEV_FACTOR
+        nn.init.trunc_normal_(self.weight, mean=0.0, std=std)
+
+    def _glorot_uniform_init(self):
+        nn.init.xavier_uniform_(self.weight, gain=1)
+
+    def _zero_init(self, use_bias=True):
+        with torch.no_grad():
+            self.weight.fill_(0.0)
+            if use_bias:
+                with torch.no_grad():
+                    self.bias.fill_(1.0)
+
+    def _normal_init(self):
+        torch.nn.init.kaiming_normal_(self.weight, nonlinearity="linear")
 
 class Embedding(nn.Embedding):
     def __init__(
@@ -105,9 +144,9 @@ class Transition(nn.Module):
         self.d_in = d_in
         self.n = n
 
-        self.linear_1 = Linear(self.d_in, self.n * self.d_in, init="relu")
+        self.linear_1 = Linear_te(self.d_in, self.n * self.d_in, init="relu")
         self.act = nn.GELU()
-        self.linear_2 = Linear(self.n * self.d_in, d_in, init="final")
+        self.linear_2 = Linear_te(self.n * self.d_in, d_in, init="final")
         self.dropout = dropout
 
     def _transition(self, x):
@@ -142,17 +181,17 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         total_dim = head_dim * self.num_heads
         self.gating = gating
-        self.linear_q = Linear(q_dim, total_dim, bias=False, init="glorot")
-        self.linear_k = Linear(k_dim, total_dim, bias=False, init="glorot")
-        self.linear_v = Linear(v_dim, total_dim, bias=False, init="glorot")
-        self.linear_o = Linear(total_dim, q_dim, init="final")
+        self.linear_q = Linear_te(q_dim, total_dim, bias=False, init="glorot")
+        self.linear_k = Linear_te(k_dim, total_dim, bias=False, init="glorot")
+        self.linear_v = Linear_te(v_dim, total_dim, bias=False, init="glorot")
+        self.linear_o = Linear_te(total_dim, q_dim, init="final")
         self.linear_g = None
         if self.gating:
-            self.linear_g = Linear(q_dim, total_dim, init="gating")
+            self.linear_g = Linear_te(q_dim, total_dim, init="gating")
         # precompute the 1/sqrt(head_dim)
         self.norm = head_dim**-0.5
         self.dropout = dropout
-        self.linear_bias = Linear(pair_dim, num_heads)
+        self.linear_bias = Linear_te(pair_dim, num_heads)
 
     def forward(
         self,
@@ -168,16 +207,17 @@ class Attention(nn.Module):
             g = self.linear_g(q)
 
         q = self.linear_q(q)
-        q *= self.norm
+        q_out = q.clone()
+        q_out *= self.norm
         k = self.linear_k(k)
         v = self.linear_v(v)
 
-        q = q.view(q.shape[:-1] + (self.num_heads, -1)).transpose(-2, -3).contiguous()
+        q_out = q_out.view(q.shape[:-1] + (self.num_heads, -1)).transpose(-2, -3).contiguous()
         k = k.view(k.shape[:-1] + (self.num_heads, -1)).transpose(-2, -3).contiguous()
         v = v.view(v.shape[:-1] + (self.num_heads, -1)).transpose(-2, -3)
 
-        attn = torch.matmul(q, k.transpose(-1, -2))
-        del q, k
+        attn = torch.matmul(q_out, k.transpose(-1, -2))
+        del q_out, k
         bias = self.linear_bias(pair).permute(0, 3, 1, 2).contiguous()
         attn = softmax_dropout(attn, self.dropout, self.training, mask=mask, bias=bias)
         o = torch.matmul(attn, v)
@@ -202,8 +242,8 @@ class OuterProduct(nn.Module):
         self.d_pair = d_pair
         self.d_hid = d_hid
 
-        self.linear_in = nn.Linear(d_atom, d_hid * 2)
-        self.linear_out = nn.Linear(d_hid**2, d_pair)
+        self.linear_in = te.Linear(d_atom, d_hid * 2)
+        self.linear_out = te.Linear(d_hid**2, d_pair)
         self.act = nn.GELU()
         self._memory_efficient = False
 
@@ -215,7 +255,8 @@ class OuterProduct(nn.Module):
         outer = a * b
         outer = outer.view(outer.shape[:-2] + (-1,))
         outer = self.linear_out(outer)
-        return outer
+        outer_copy = outer.clone()
+        return outer_copy
 
     def apply_memory_efficient(self):
         self._memory_efficient = True
@@ -426,8 +467,8 @@ class NonLinear(nn.Module):
 
         if hidden is None:
             hidden = input
-        self.layer1 = Linear(input, hidden, init="relu")
-        self.layer2 = Linear(hidden, output_size, init="final")
+        self.layer1 = Linear_te(input, hidden, init="relu")
+        self.layer2 = Linear_te(hidden, output_size, init="final")
 
     def forward(self, x):
         x = self.layer1(x)
@@ -448,10 +489,10 @@ class EnergyHead(nn.Module):
     ):
         super().__init__()
         self.layer_norm = LayerNorm(input_dim)
-        self.linear_in = Linear(input_dim, input_dim, init="relu")
+        self.linear_in = Linear_te(input_dim, input_dim, init="relu")
 
-        self.linear_out = Linear(input_dim, output_dim, bias=True, init="final")
-
+        # self.linear_out = Linear(input_dim, output_dim, bias=True, init="final")
+        self.linear_out = Linear_nn(input_dim, output_dim, bias=True)
     def forward(self, x):
         x = x.type(self.linear_in.weight.dtype)
         x = F.gelu(self.layer_norm(self.linear_in(x)))
@@ -469,15 +510,16 @@ class MovementPredictionHead(nn.Module):
         super().__init__()
         self.layer_norm = LayerNorm(embed_dim)
         self.embed_dim = embed_dim
-        self.q_proj = Linear(embed_dim, embed_dim, bias=False, init="glorot")
-        self.k_proj = Linear(embed_dim, embed_dim, bias=False, init="glorot")
-        self.v_proj = Linear(embed_dim, embed_dim, bias=False, init="glorot")
+        self.q_proj = Linear_te(embed_dim, embed_dim, bias=False, init="glorot")
+        self.k_proj = Linear_te(embed_dim, embed_dim, bias=False, init="glorot")
+        self.v_proj = Linear_te(embed_dim, embed_dim, bias=False, init="glorot")
         self.num_head = num_head
         self.scaling = (embed_dim // num_head) ** -0.5
-        self.force_proj1 = Linear(embed_dim, 1, init="final")
-        self.force_proj2 = Linear(embed_dim, 1, init="final")
-        self.force_proj3 = Linear(embed_dim, 1, init="final")
-        self.linear_bias = Linear(pair_dim, num_head)
+        self.force_proj1 = Linear_nn(embed_dim, 1, init="final")
+        self.force_proj2 = Linear_nn(embed_dim, 1, init="final")
+        self.force_proj3 = Linear_nn(embed_dim, 1, init="final")
+
+        self.linear_bias = Linear_te(pair_dim, num_head)
         self.dropout = 0.1
 
     def zero_init(self):
@@ -552,11 +594,11 @@ class TriangleMultiplication(nn.Module):
     def __init__(self, d_pair, d_hid):
         super(TriangleMultiplication, self).__init__()
 
-        self.linear_ab_p = Linear(d_pair, d_hid * 2)
-        self.linear_ab_g = Linear(d_pair, d_hid * 2, init="gating")
+        self.linear_ab_p = Linear_te(d_pair, d_hid * 2)
+        self.linear_ab_g = Linear_te(d_pair, d_hid * 2, init="gating")
 
-        self.linear_g = Linear(d_pair, d_pair, init="gating")
-        self.linear_z = Linear(d_hid, d_pair, init="final")
+        self.linear_g = Linear_te(d_pair, d_pair, init="gating")
+        self.linear_z = Linear_te(d_hid, d_pair, init="final")
 
         self.layer_norm_out = LayerNorm(d_hid)
 

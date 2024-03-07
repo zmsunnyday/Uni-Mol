@@ -10,6 +10,7 @@ from unicore.losses import UnicoreLoss, register_loss
 from scipy.spatial.transform import Rotation as R
 from typing import List, Callable, Any, Dict
 import os
+import transformer_engine.pytorch as te
 
 
 @register_loss("unimol_plus")
@@ -46,14 +47,63 @@ class UnimolPlusLoss(UnicoreLoss):
         with torch.no_grad():
             sample_size = sample["batched_data"]["atom_mask"].shape[0]
             natoms = sample["batched_data"]["atom_mask"].shape[1]
+            if sample_size%16 != 0:
+                old_sample_size = sample_size
+                sample_size = sample_size + 16 - sample_size%16
 
-        (
-            graph_output,
-            pos_pred,
-            pos_target_mask,
-            dist_pred,
-            update_num,
-        ) = model(**sample)
+                new_atom_feat = torch.zeros([sample_size, natoms, 9], dtype=sample["batched_data"]["atom_feat"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_atom_feat[:old_sample_size,:,:] = sample["batched_data"]["atom_feat"]
+                sample["batched_data"]["atom_feat"] = new_atom_feat
+
+                new_atom_mask = torch.zeros([sample_size, natoms], dtype=sample["batched_data"]["atom_mask"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_atom_mask[:old_sample_size,:] = sample["batched_data"]["atom_mask"]
+                sample["batched_data"]["atom_mask"] = new_atom_mask
+                
+                new_edge_feat = torch.zeros([sample_size, natoms, natoms, 3], dtype=sample["batched_data"]["edge_feat"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_edge_feat[:old_sample_size,:,: , :] = sample["batched_data"]["edge_feat"]
+                sample["batched_data"]["edge_feat"] = new_edge_feat
+
+                new_shortest_path = torch.zeros([sample_size, natoms, natoms], dtype=sample["batched_data"]["shortest_path"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_shortest_path[:old_sample_size,:,: ] = sample["batched_data"]["shortest_path"]
+                sample["batched_data"]["shortest_path"] = new_shortest_path              
+
+                new_degree = torch.zeros([sample_size, natoms], dtype=sample["batched_data"]["degree"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_degree[:old_sample_size,:] = sample["batched_data"]["degree"]
+                sample["batched_data"]["degree"] = new_degree         
+
+                new_pair_type = torch.zeros([sample_size, natoms, natoms, 2], dtype=sample["batched_data"]["pair_type"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_pair_type[:old_sample_size,:, :, :] = sample["batched_data"]["pair_type"]
+                sample["batched_data"]["pair_type"] = new_pair_type
+
+                new_attn_bias = torch.zeros([sample_size, natoms+1, natoms+1], dtype=sample["batched_data"]["attn_bias"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_attn_bias[:old_sample_size, :, :] = sample["batched_data"]["attn_bias"]
+                sample["batched_data"]["attn_bias"] = new_attn_bias
+
+                new_pos = torch.zeros([sample_size, natoms, 3], dtype=sample["batched_data"]["pos"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_pos[:old_sample_size,:, :] = sample["batched_data"]["pos"]
+                sample["batched_data"]["pos"] = new_pos
+
+                new_pos_target = torch.zeros([sample_size, natoms, 3], dtype=sample["batched_data"]["pos_target"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_pos_target[:old_sample_size,:, :] = sample["batched_data"]["pos_target"]
+                sample["batched_data"]["pos_target"] = new_pos_target
+
+                new_target = torch.zeros([sample_size], dtype=sample["batched_data"]["target"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_target[:old_sample_size] = sample["batched_data"]["target"]
+                sample["batched_data"]["target"] = new_target
+
+                new_id = torch.zeros([sample_size], dtype=sample["batched_data"]["id"].dtype, device=sample["batched_data"]["atom_feat"].device).contiguous()
+                new_id[:old_sample_size] = sample["batched_data"]["id"]
+                sample["batched_data"]["id"] = new_id
+                pass                   
+
+        with te.fp8_autocast(enabled=self.args.use_fp8):
+            (
+                graph_output,
+                pos_pred,
+                pos_target_mask,
+                dist_pred,
+                update_num,
+            ) = model(**sample)
         if self.training:
             max_update = self.args.max_update
             # print(update_num)

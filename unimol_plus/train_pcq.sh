@@ -1,6 +1,6 @@
 [ -z "${MASTER_PORT}" ] && MASTER_PORT=10088
 [ -z "${MASTER_IP}" ] && MASTER_IP=127.0.0.1
-[ -z "${n_gpu}" ] && n_gpu=$(nvidia-smi -L | wc -l)
+[ -z "${n_gpu}" ] && n_gpu=1
 [ -z "${OMPI_COMM_WORLD_SIZE}" ] && OMPI_COMM_WORLD_SIZE=1
 [ -z "${OMPI_COMM_WORLD_RANK}" ] && OMPI_COMM_WORLD_RANK=0
 
@@ -75,4 +75,4 @@ torchrun --nproc_per_node=$n_gpu --nnodes=$OMPI_COMM_WORLD_SIZE  --node_rank=$OM
       --dist-loss-weight $dist_loss_weight --pos-loss-weight $pos_loss_weight \
       --min-dist-loss-weight $min_dist_loss_weight --min-pos-loss-weight $min_pos_loss_weight \
       --label-prob $label_prob --noise-scale $noise  \
-      --mid-prob $mid_prob --mid-lower $mid_lower --mid-upper $mid_upper --seed $seed $more_args 
+      --mid-prob $mid_prob --mid-lower $mid_lower --mid-upper $mid_upper --seed $seed $more_args --use-fp8

@@ -16,7 +16,8 @@ from .layers import (
     SE3InvariantKernel,
     MovementPredictionHead,
     EnergyHead,
-    Linear,
+    Linear_nn,
+    Linear_te,
     Embedding,
 )
 from .unimol_plus_encoder import UnimolPLusEncoder
@@ -28,7 +29,7 @@ def init_params(module):
     def normal_(data):
         data.copy_(data.cpu().normal_(mean=0.0, std=0.02).to(data.device))
 
-    if isinstance(module, nn.Linear) or isinstance(module, Linear):
+    if isinstance(module, nn.Linear) or isinstance(module, Linear_te):
         normal_(module.weight.data)
         if module.bias is not None:
             module.bias.data.zero_()
@@ -310,22 +311,23 @@ class UnimolPlusPCQModel(BaseUnicoreModel):
             delta_pos = pos.unsqueeze(1) - pos.unsqueeze(2)
             dist = delta_pos.norm(dim=-1)
             attn_bias_3d = self.se3_invariant_kernel(dist.detach(), pair_type)
-            pair[:, 1:, 1:, :] = pair[:, 1:, 1:, :] + attn_bias_3d.type(dtype)
-            x, pair = self.molecule_encoder(
+            pair_clone = pair.clone()
+            pair_clone[:, 1:, 1:, :] = pair[:, 1:, 1:, :] + attn_bias_3d.type(dtype)
+            x, pair_clone = self.molecule_encoder(
                 x,
-                pair,
+                pair_clone,
                 atom_mask=atom_mask_cls,
                 pair_mask=pair_mask,
                 attn_mask=attn_mask,
             )
             node_output = self.movement_pred_head(
                 x[:, 1:, :],
-                pair[:, 1:, 1:, :],
+                pair_clone[:, 1:, 1:, :],
                 attn_mask[:, :, 1:, 1:],
                 delta_pos.detach(),
             )
             node_output = node_output * self.args.pos_step_size
-            return x, pair, pos + node_output
+            return x, pair_clone, pos + node_output
 
         pair = attn_bias.type(dtype)
         for _ in range(num_block):
