@@ -538,7 +538,7 @@ class MovementPredictionHead(nn.Module):
         delta_pos: Tensor,
     ) -> Tensor:
         bsz, n_node, _ = query.size()
-        query = self.layer_norm(query)
+        query = self.layer_norm(query.contiguous())
         q = (
             self.q_proj(query).view(bsz, n_node, self.num_head, -1).transpose(1, 2)
             * self.scaling
@@ -631,7 +631,7 @@ class TriangleMultiplication(nn.Module):
 
         x = permute_final_dims(x, (1, 2, 0))
 
-        x = self.layer_norm_out(x)
+        x = self.layer_norm_out(x.contiguous())
         x = self.linear_z(x)
         return g * x
 
