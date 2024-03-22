@@ -14,6 +14,28 @@ from torch import Tensor
 from typing import Callable, Optional
 import transformer_engine.pytorch as te
 LayerNorm = te.LayerNorm
+
+def _trunc_normal_init(weight, scale=1.0):
+    # Constant from scipy.stats.truncnorm.std(a=-2, b=2, loc=0., scale=1.)
+    TRUNCATED_NORMAL_STDDEV_FACTOR = 0.87962566103423978
+    _, fan_in = weight.shape
+    scale = scale / max(1, fan_in)
+    std = (scale**0.5) / TRUNCATED_NORMAL_STDDEV_FACTOR
+    nn.init.trunc_normal_(weight, mean=0.0, std=std)
+
+def _glorot_uniform_init(weight):
+    nn.init.xavier_uniform_(weight, gain=1)
+
+def _zero_init(weight, bias, use_bias=True):
+    with torch.no_grad():
+        weight.fill_(0.0)
+        if use_bias:
+            with torch.no_grad():
+                bias.fill_(1.0)
+
+def _normal_init(weight):
+    torch.nn.init.kaiming_normal_(weight, nonlinearity="linear")
+
 class Dropout(nn.Module):
     def __init__(self, p):
         super().__init__()
@@ -32,45 +54,23 @@ class Linear_te(te.Linear):
         d_in: int,
         d_out: int,
         bias: bool = True,
-        init: str = "default",
-        use_te: bool = True
+        init: str = "default"
     ):
         super(Linear_te, self).__init__(d_in, d_out, bias=bias)
         if init == "default":
-            self._trunc_normal_init(1.0)
+            _trunc_normal_init(self.weight, 1.0)
         elif init == "relu":
-            self._trunc_normal_init(2.0)
+            _trunc_normal_init(self.weight, 2.0)
         elif init == "glorot":
-            self._glorot_uniform_init()
+            _glorot_uniform_init(self.weight)
         elif init == "gating":
-            self._zero_init(self.use_bias)
+            _zero_init(self.weight, self.bias, self.use_bias)
         elif init == "normal":
-            self._normal_init()
+            _normal_init(self.weight)
         elif init == "final":
-            self._zero_init(False)
+            _zero_init(self.weight, self.bias)
         else:
             raise ValueError("Invalid init method.")
-
-    def _trunc_normal_init(self, scale=1.0):
-        # Constant from scipy.stats.truncnorm.std(a=-2, b=2, loc=0., scale=1.)
-        TRUNCATED_NORMAL_STDDEV_FACTOR = 0.87962566103423978
-        _, fan_in = self.weight.shape
-        scale = scale / max(1, fan_in)
-        std = (scale**0.5) / TRUNCATED_NORMAL_STDDEV_FACTOR
-        nn.init.trunc_normal_(self.weight, mean=0.0, std=std)
-
-    def _glorot_uniform_init(self):
-        nn.init.xavier_uniform_(self.weight, gain=1)
-
-    def _zero_init(self, use_bias=True):
-        with torch.no_grad():
-            self.weight.fill_(0.0)
-            if use_bias:
-                with torch.no_grad():
-                    self.bias.fill_(1.0)
-
-    def _normal_init(self):
-        torch.nn.init.kaiming_normal_(self.weight, nonlinearity="linear")
 
 class Linear_nn(nn.Linear):
     def __init__(
@@ -78,45 +78,23 @@ class Linear_nn(nn.Linear):
         d_in: int,
         d_out: int,
         bias: bool = True,
-        init: str = "default",
-        use_te: bool = True
+        init: str = "default"
     ):
         super(Linear_nn, self).__init__(d_in, d_out, bias=bias)
         if init == "default":
-            self._trunc_normal_init(1.0)
+            _trunc_normal_init(self.weight, 1.0)
         elif init == "relu":
-            self._trunc_normal_init(2.0)
+            _trunc_normal_init(self.weight, 2.0)
         elif init == "glorot":
-            self._glorot_uniform_init()
+            _glorot_uniform_init(self.weight)
         elif init == "gating":
-            self._zero_init(self.use_bias)
+            _zero_init(self.weight, self.bias, self.use_bias)
         elif init == "normal":
-            self._normal_init()
+            _normal_init(self.weight)
         elif init == "final":
-            self._zero_init(False)
+            _zero_init(self.weight, self.bias)
         else:
             raise ValueError("Invalid init method.")
-
-    def _trunc_normal_init(self, scale=1.0):
-        # Constant from scipy.stats.truncnorm.std(a=-2, b=2, loc=0., scale=1.)
-        TRUNCATED_NORMAL_STDDEV_FACTOR = 0.87962566103423978
-        _, fan_in = self.weight.shape
-        scale = scale / max(1, fan_in)
-        std = (scale**0.5) / TRUNCATED_NORMAL_STDDEV_FACTOR
-        nn.init.trunc_normal_(self.weight, mean=0.0, std=std)
-
-    def _glorot_uniform_init(self):
-        nn.init.xavier_uniform_(self.weight, gain=1)
-
-    def _zero_init(self, use_bias=True):
-        with torch.no_grad():
-            self.weight.fill_(0.0)
-            if use_bias:
-                with torch.no_grad():
-                    self.bias.fill_(1.0)
-
-    def _normal_init(self):
-        torch.nn.init.kaiming_normal_(self.weight, nonlinearity="linear")
 
 class Embedding(nn.Embedding):
     def __init__(
@@ -167,9 +145,7 @@ class Transition(nn.Module):
 class Attention(nn.Module):
     def __init__(
         self,
-        q_dim: int,
-        k_dim: int,
-        v_dim: int,
+        qkv_dim: int,
         pair_dim: int,
         head_dim: int,
         num_heads: int,
@@ -181,13 +157,13 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         total_dim = head_dim * self.num_heads
         self.gating = gating
-        self.linear_q = Linear_te(q_dim, total_dim, bias=False, init="glorot")
-        self.linear_k = Linear_te(k_dim, total_dim, bias=False, init="glorot")
-        self.linear_v = Linear_te(v_dim, total_dim, bias=False, init="glorot")
-        self.linear_o = Linear_te(total_dim, q_dim, init="final")
+        self.linear_qkv = Linear_te(qkv_dim, total_dim*3, bias=False, init="glorot")
+        # self.linear_k = Linear_te(k_dim, total_dim, bias=False, init="glorot")
+        # self.linear_v = Linear_te(v_dim, total_dim, bias=False, init="glorot")
+        self.linear_o = Linear_te(total_dim, qkv_dim, init="final")
         self.linear_g = None
         if self.gating:
-            self.linear_g = Linear_te(q_dim, total_dim, init="gating")
+            self.linear_g = Linear_te(qkv_dim, total_dim, init="gating")
         # precompute the 1/sqrt(head_dim)
         self.norm = head_dim**-0.5
         self.dropout = dropout
@@ -195,29 +171,26 @@ class Attention(nn.Module):
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        x: torch.Tensor,
         pair: torch.Tensor,
         mask: torch.Tensor = None,
     ) -> torch.Tensor:
         g = None
         if self.linear_g is not None:
             # gating, use raw query input
-            g = self.linear_g(q)
+            g = self.linear_g(x)
 
-        q = self.linear_q(q)
-        q_out = q.clone()
-        q_out *= self.norm
-        k = self.linear_k(k)
-        v = self.linear_v(v)
+        qkv = self.linear_qkv(x)
+        q, k, v = torch.split(qkv, qkv.size(2) // 3, dim=2)
 
-        q_out = q_out.view(q.shape[:-1] + (self.num_heads, -1)).transpose(-2, -3).contiguous()
+        q = q.view(q.shape[:-1] + (self.num_heads, -1)).transpose(-2, -3).contiguous()
         k = k.view(k.shape[:-1] + (self.num_heads, -1)).transpose(-2, -3).contiguous()
         v = v.view(v.shape[:-1] + (self.num_heads, -1)).transpose(-2, -3)
 
-        attn = torch.matmul(q_out, k.transpose(-1, -2))
-        del q_out, k
+        q *= self.norm
+
+        attn = torch.matmul(q, k.transpose(-1, -2))
+        del q, k
         bias = self.linear_bias(pair).permute(0, 3, 1, 2).contiguous()
         attn = softmax_dropout(attn, self.dropout, self.training, mask=mask, bias=bias)
         o = torch.matmul(attn, v)
@@ -672,8 +645,6 @@ class UnimolPlusEncoderLayer(nn.Module):
         head_dim = self.embedding_dim // self.num_attention_heads
         self.self_attn = Attention(
             self.embedding_dim,
-            self.embedding_dim,
-            self.embedding_dim,
             pair_dim=pair_dim,
             head_dim=head_dim,
             num_heads=self.num_attention_heads,
@@ -729,8 +700,6 @@ class UnimolPlusEncoderLayer(nn.Module):
         """
         residual = x
         x = self.self_attn(
-            x,
-            x,
             x,
             pair=pair,
             mask=self_attn_mask,

@@ -49,8 +49,8 @@ batch_size=$4
 more_args=""
 
 
-more_args=$more_args" --ema-decay $ema_decay --validate-with-ema"
-save_dir=$save_dir"-ema"$ema_decay
+more_args=$more_args
+save_dir=$save_dir
 
 
 mkdir -p $save_dir
@@ -64,7 +64,7 @@ torchrun --nproc_per_node=$n_gpu --nnodes=$OMPI_COMM_WORLD_SIZE  --node_rank=$OM
       --task pcq --loss unimol_plus --arch $arch \
       --fp16 --fp16-init-scale 4 --fp16-scale-window 256 --tensorboard-logdir $save_dir/tsb \
       --log-interval 100 --log-format simple \
-      --save-interval-updates 10000 --validate-interval-updates 10000 --keep-interval-updates 50 --no-epoch-checkpoints  \
+      --save-interval-updates 10000 --validate-interval-updates 1000000 --keep-interval-updates 50 --no-epoch-checkpoints  \
       --save-dir $save_dir \
       --batch-size $batch_size \
       --data-buffer-size 32 --fixed-validation-seed 11 --batch-size-valid 256 \
