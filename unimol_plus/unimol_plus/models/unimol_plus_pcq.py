@@ -17,7 +17,7 @@ from .layers import (
     MovementPredictionHead,
     EnergyHead,
     Linear_nn,
-    Linear_te,
+    # Linear_te,
     Embedding,
 )
 from .unimol_plus_encoder import UnimolPLusEncoder
@@ -29,7 +29,7 @@ def init_params(module):
     def normal_(data):
         data.copy_(data.cpu().normal_(mean=0.0, std=0.02).to(data.device))
 
-    if isinstance(module, nn.Linear) or isinstance(module, Linear_te):
+    if isinstance(module, nn.Linear) or isinstance(module, Linear_nn):
         normal_(module.weight.data)
         if module.bias is not None:
             module.bias.data.zero_()

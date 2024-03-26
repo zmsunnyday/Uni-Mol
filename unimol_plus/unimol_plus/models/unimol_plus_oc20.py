@@ -17,7 +17,7 @@ from .layers import (
     MovementPredictionHead,
     EnergyHead,
     Linear_nn,
-    Linear_te,
+    # Linear_te,
     Embedding,
 )
 from .unimol_plus_encoder import UnimolPLusEncoder
