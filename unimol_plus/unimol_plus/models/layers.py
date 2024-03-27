@@ -190,8 +190,8 @@ class OuterProduct(nn.Module):
         self.d_atom = d_atom
         self.d_pair = d_pair
         self.d_hid = d_hid
-
-        self.linear_in = te.Linear(d_atom, d_hid * 2)
+        self.layernorm_linear = te.LayerNormLinear(d_atom, d_hid * 2)
+        # self.linear_in = te.Linear(d_atom, d_hid * 2)
         self.linear_out = te.Linear(d_hid**2, d_pair)
         self.act = nn.GELU()
         self._memory_efficient = False
@@ -216,7 +216,7 @@ class OuterProduct(nn.Module):
         op_mask: Optional[torch.Tensor] = None,
         op_norm: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        ab = self.linear_in(m)
+        ab = self.layernorm_linear(m)
         ab = ab * op_mask
         a, b = ab.chunk(2, dim=-1)
         if self._memory_efficient and torch.is_grad_enabled():
@@ -547,9 +547,7 @@ class TriangleMultiplication(nn.Module):
         self.linear_ab_g = te.Linear(d_pair, d_hid * 2, init_method=zero_init)
 
         self.linear_g = te.Linear(d_pair, d_pair, init_method=zero_init)
-        self.linear_z = te.Linear(d_hid, d_pair, init_method=zero_init)
-
-        self.layer_norm_out = LayerNorm(d_hid)
+        self.layernorm_linear = te.LayerNormLinear(d_hid, d_pair, init_method=zero_init)
 
     def forward(
         self,
@@ -578,10 +576,9 @@ class TriangleMultiplication(nn.Module):
         x = x + torch.matmul(a2, b2)
         del a, b, a2, b2
 
-        x = permute_final_dims(x, (1, 2, 0))
+        x = permute_final_dims(x, (1, 2, 0)).contiguous()
 
-        x = self.layer_norm_out(x.contiguous())
-        x = self.linear_z(x)
+        x = self.layernorm_linear(x)
         return g * x
 
 
@@ -629,29 +626,41 @@ class UnimolPlusEncoderLayer(nn.Module):
         )
 
         # layer norm associated with the self attention layer
-        self.self_attn_layer_norm = LayerNorm(self.embedding_dim)
+        self.self_attn_layer_norm_ffn = te.LayerNormMLP(
+            hidden_size=self.embedding_dim, 
+            ffn_hidden_size=ffn_embedding_dim,
+            return_layernorm_output=True,
+            init_method=relu_init,
+            output_layer_init_method=zero_init
+            )
 
-        self.ffn = Transition(
-            self.embedding_dim,
-            ffn_embedding_dim // self.embedding_dim,
-            dropout=activation_dropout,
-        )
+        # self.ffn = Transition(
+        #     self.embedding_dim,
+        #     ffn_embedding_dim // self.embedding_dim,
+        #     dropout=activation_dropout,
+        # )
 
         # layer norm associated with the position wise feed-forward NN
-        self.final_layer_norm = LayerNorm(self.embedding_dim)
+        # self.final_layer_norm = LayerNorm(self.embedding_dim)
 
         self.opm = OuterProduct(self.embedding_dim, pair_dim, d_hid=pair_hidden_dim)
         self.pair_layer_norm_opm = LayerNorm(pair_dim)
 
         self.pair_layer_norm_ffn = LayerNorm(pair_dim)
-        self.pair_ffn = Transition(
-            pair_dim,
-            1,
-            dropout=activation_dropout,
-        )
+        # self.pair_ffn = Transition(
+        #     pair_dim,
+        #     1,
+        #     dropout=activation_dropout,
+        # )
 
         self.pair_dropout = pair_dropout
-        self.pair_layer_norm_trimul = LayerNorm(pair_dim)
+        self.pair_layer_norm_MLP_trimul = te.LayerNormMLP(
+            hidden_size=pair_dim, 
+            ffn_hidden_size=pair_dim,
+            return_layernorm_output=False,
+            init_method=relu_init,
+            output_layer_init_method=zero_init
+            )
         self.pair_tri_mul = TriangleMultiplication(pair_dim, pair_hidden_dim)
 
     def shared_dropout(self, x, shared_dim, dropout):
@@ -682,14 +691,11 @@ class UnimolPlusEncoderLayer(nn.Module):
         )
         x = self.dropout_module(x)
         x = residual + x
-        x = self.self_attn_layer_norm(x)
-
-        residual = x
-        x = self.ffn(x)
+        x, residual = self.self_attn_layer_norm_ffn(x)
         x = self.dropout_module(x)
 
         x = residual + x
-        x = self.final_layer_norm(x)
+        # x = self.final_layer_norm(x)
 
         pair = pair + self.dropout_module(self.opm(x, op_mask, op_norm))
         pair = self.pair_layer_norm_opm(pair)
@@ -698,9 +704,8 @@ class UnimolPlusEncoderLayer(nn.Module):
             self.pair_tri_mul(pair, pair_mask), -3, self.pair_dropout
         )
         pair = pair + pair_update
-        pair = self.pair_layer_norm_trimul(pair)
+        pair = self.pair_layer_norm_MLP_trimul(pair)
 
-        # ffn
-        pair = pair + self.dropout_module(self.pair_ffn(pair))
+        pair = pair + self.dropout_module(pair)
         pair = self.pair_layer_norm_ffn(pair)
         return x, pair
