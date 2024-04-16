@@ -385,3 +385,13 @@ def large_architecture(args):
 def small_architecture(args):
     args.layers = getattr(args, "layers", 6)
     base_architecture(args)
+
+@register_model_architecture("unimol_plus_pcq", "unimol_plus_pcq_1b")
+def small_architecture(args):
+    args.embed_dim = getattr(args, "embed_dim", 1536)
+    args.pair_embed_dim = getattr(args, "pair_embed_dim", 512)
+    args.pair_hidden_dim = getattr(args, "pair_hidden_dim", 64)
+    args.layers = getattr(args, "layers", 64)
+    args.ffn_embed_dim = getattr(args, "ffn_embed_dim", 1536)
+    args.attention_heads = getattr(args, "attention_heads", 96)
+    base_architecture(args)
